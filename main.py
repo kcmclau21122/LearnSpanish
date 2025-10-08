@@ -36,6 +36,7 @@ setup_logging(
 # Get module logger
 logger = get_logger(__name__)
 logger.info("Application starting...")
+logger.info(f"Log file location: {get_log_file_path()}")
 
 
 def initialize_session_state():
@@ -50,6 +51,7 @@ def initialize_session_state():
     if 'config' not in st.session_state:
         st.session_state.config = load_config()
         logger.info("Configuration loaded into session state")
+        logger.info(f"Config file: {get_config_info()['config_file']}")
     
     if 'conversation_history' not in st.session_state:
         st.session_state.conversation_history = []
@@ -78,60 +80,6 @@ def initialize_session_state():
     logger.debug("Session state initialization complete")
 
 
-def render_options_page():
-    """Render the options/settings page with all configuration options."""
-    logger.info("Rendering options page")
-    
-    st.title("⚙️ Options")
-    
-    config = st.session_state.config
-    
-    # Model Settings
-    st.header("🤖 Model Settings")
-    
-    # Local vs Cloud selection
-    use_cloud = st.checkbox(
-        "Use Cloud-hosted Models",
-        value=config['use_cloud'],
-        help="Enable this for large models like deepseek-v3 hosted on ollama.com"
-    )
-    
-    if use_cloud != config['use_cloud']:
-        logger.info(f"Cloud mode changed: {config['use_cloud']} -> {use_cloud}")
-    
-    config['use_cloud'] = use_cloud
-    
-    if use_cloud:
-        render_cloud_model_settings(config)
-    else:
-        render_local_model_settings(config)
-    
-    st.divider()
-    
-    # Speech Settings
-    render_speech_settings(config)
-    
-    st.divider()
-    
-    # UI Settings
-    render_ui_settings(config)
-    
-    st.divider()
-    
-    # Logging Settings
-    render_logging_settings(config)
-    
-    st.divider()
-    
-    # Diagnostics
-    render_diagnostics()
-    
-    st.divider()
-    
-    # Save/Reset buttons
-    render_options_buttons(config)
-
-
 def render_cloud_model_settings(config: Dict[str, Any]):
     """Render cloud model configuration options."""
     logger.debug("Rendering cloud model settings")
@@ -151,8 +99,28 @@ def render_cloud_model_settings(config: Dict[str, Any]):
     current_api_key = get_api_key()
     api_key_status = "✅ Set" if current_api_key else "❌ Not set"
     
-    st.info(f"**API Key Status:** {api_key_status}")
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        st.info(f"**API Key Status:** {api_key_status}")
+    with col2:
+        if st.button("🔄 Reload Key"):
+            current_api_key = get_api_key()
+            logger.info("API key reloaded from .env.txt")
+            st.rerun()
+    
     st.caption("Get your API key at: https://ollama.com/settings/keys")
+    
+    # Show config info
+    config_info = get_config_info()
+    with st.expander("📁 File Locations"):
+        if config_info['project_env_exists']:
+            st.success(f"✅ Using project .env.txt: `{config_info['project_env_file']}`")
+        elif config_info['env_exists']:
+            st.info(f"📁 Using home .env.txt: `{config_info['env_file']}`")
+        else:
+            st.warning("⚠️ No .env.txt file found")
+        
+        st.caption(f"Config: `{config_info['config_file']}`")
     
     # Show masked key if exists
     if current_api_key:
@@ -214,6 +182,7 @@ def render_cloud_model_settings(config: Dict[str, Any]):
     
     if config['preferred_model'] not in cloud_model_names:
         config['preferred_model'] = cloud_model_names[0]
+        logger.info(f"Reset model to default: {cloud_model_names[0]}")
     
     current_index = cloud_model_names.index(config['preferred_model'])
     
@@ -232,10 +201,10 @@ def render_cloud_model_settings(config: Dict[str, Any]):
     
     st.info("""
     **Recommended for Spanish Learning:**
-    - **gpt-oss**: Good starting point, fast
-    - **deepseek-v3**: Best for Spanish (recommended)
-    - **llama3.1:70b**: High quality responses
-    - **qwen2.5:72b**: Strong multilingual
+    - **deepseek-v3.1:671b-cloud**: Best for Spanish (RECOMMENDED) - 671B parameters
+    - **gpt-oss:120b-cloud**: Good alternative - 120B parameters
+    - **gpt-oss:20b-cloud**: Faster, smaller option - 20B parameters
+    - **qwen3-coder:480b-cloud**: Best for coding tasks
     """)
 
 
@@ -249,7 +218,7 @@ def render_local_model_settings(config: Dict[str, Any]):
     
     if not local_models:
         st.error("No local Ollama models found. Please install models using 'ollama pull <model-name>'")
-        st.info("Recommended local models: qwen2.5:7b, llama2, gemma3")
+        st.info("Recommended local models: qwen2.5:7b, llama3.2, gemma2")
         
         st.markdown("---")
         st.subheader("Manual Model Entry")
@@ -257,7 +226,7 @@ def render_local_model_settings(config: Dict[str, Any]):
         
         manual_model = st.text_input(
             "Model Name",
-            placeholder="e.g., llama2, qwen2.5:7b",
+            placeholder="e.g., llama3.2, qwen2.5:7b",
             help="Enter the exact model name as shown in 'ollama list'"
         )
         
@@ -477,9 +446,14 @@ def render_diagnostics():
             st.write(f"**Config Location:** `{config_info['config_file']}`")
         
         with col2:
-            st.write(f"**API Key File:** {'✅ Exists' if config_info['env_exists'] else '❌ Not found'}")
+            st.write(f"**API Key File:** {'✅ Exists' if config_info['env_exists'] or config_info['project_env_exists'] else '❌ Not found'}")
             st.write(f"**API Key Loaded:** {'✅ Yes' if config_info['has_api_key'] else '❌ No'}")
-            st.write(f"**Env Location:** `{config_info['env_file']}`")
+            if config_info['project_env_exists']:
+                st.write(f"**Env Location:** `{config_info['project_env_file']}`")
+            else:
+                st.write(f"**Env Location:** `{config_info['env_file']}`")
+        
+        st.write(f"**Log File:** `{get_log_file_path()}`")
         
         st.markdown("---")
         st.markdown("### Quick Tests")
@@ -507,6 +481,7 @@ def render_options_buttons(config: Dict[str, Any]):
     with col1:
         if st.button("💾 Save Settings", type="primary", use_container_width=True):
             logger.info("Saving configuration")
+            logger.info(f"Config will be saved to: {get_config_info()['config_file']}")
             if save_config(config):
                 st.success("Settings saved successfully!")
                 st.session_state.config = config
@@ -530,11 +505,69 @@ def render_options_buttons(config: Dict[str, Any]):
             st.rerun()
 
 
+def render_options_page():
+    """Render the options/settings page with all configuration options."""
+    logger.info("Rendering options page")
+    
+    st.title("⚙️ Options")
+    
+    config = st.session_state.config
+    
+    # Model Settings
+    st.header("🤖 Model Settings")
+    
+    # Local vs Cloud selection
+    use_cloud = st.checkbox(
+        "Use Cloud-hosted Models",
+        value=config['use_cloud'],
+        help="Enable this for large models like deepseek-v3 hosted on ollama.com"
+    )
+    
+    if use_cloud != config['use_cloud']:
+        logger.info(f"Cloud mode changed: {config['use_cloud']} -> {use_cloud}")
+    
+    config['use_cloud'] = use_cloud
+    
+    if use_cloud:
+        render_cloud_model_settings(config)
+    else:
+        render_local_model_settings(config)
+    
+    st.divider()
+    
+    # Speech Settings
+    render_speech_settings(config)
+    
+    st.divider()
+    
+    # UI Settings
+    render_ui_settings(config)
+    
+    st.divider()
+    
+    # Logging Settings
+    render_logging_settings(config)
+    
+    st.divider()
+    
+    # Diagnostics
+    render_diagnostics()
+    
+    st.divider()
+    
+    # Save/Reset buttons
+    render_options_buttons(config)
+
+
+# Rest of the render functions (render_translation_mode, render_correction_mode, 
+# render_conversation_mode, process_conversation_input, render_main_app) 
+# remain the same as in your original file
+
 def render_translation_mode(tutor: SpanishTutor, config: Dict[str, Any]):
     """Render translation mode interface."""
     logger.debug("Rendering translation mode")
     
-    st.header("📝 English to Spanish Translation")
+    st.header("🔍 English to Spanish Translation")
     
     col1, col2 = st.columns(2)
     
@@ -813,6 +846,7 @@ def main():
     """Main application entry point."""
     logger.info("=" * 80)
     logger.info("SPANISH LEARNING ASSISTANT - Session Started")
+    logger.info(f"Log file: {get_log_file_path()}")
     logger.info("=" * 80)
     
     st.set_page_config(
