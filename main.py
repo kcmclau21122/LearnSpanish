@@ -1,317 +1,67 @@
 """
-Spanish Learning Assistant - Streamlit Application
+Spanish Learning Assistant - Main Application
+=============================================
 A comprehensive Spanish learning tool with translation, correction, and conversation features.
-Supports both local and cloud-hosted Ollama models.
+Supports both local and cloud-hosted Ollama models with full logging and configuration management.
+
+Main entry point for the Streamlit application.
 """
 
 import streamlit as st
-import speech_recognition as sr
-from gtts import gTTS
-import os
-import tempfile
+import logging
 from datetime import datetime
-import json
-from pathlib import Path
-from typing import Optional, List, Dict, Any
-import requests
+from typing import Dict, Any
 
-# Constants
-CONFIG_FILE = Path.home() / ".spanish_tutor_config.json"
-ENV_FILE = Path.home() / ".env.txt"
+# Import custom modules
+from logger_config import setup_logging, get_logger, get_log_file_path, clear_old_logs
+from config_manager import (
+    load_config, save_config, reset_config, 
+    load_env, save_env, get_api_key, get_config_info
+)
+from ollama_manager import (
+    get_local_models, get_cloud_models, 
+    test_ollama_connection, OLLAMA_AVAILABLE
+)
+from audio_manager import text_to_speech, speech_to_text
+from spanish_tutor import SpanishTutor
 
-DEFAULT_CONFIG = {
-    "preferred_model": "deepseek-v3",
-    "use_cloud": False,
-    "cloud_endpoint": "https://api.ollama.ai",
-    "speech_timeout": 10,
-    "phrase_time_limit": 15,
-    "ambient_noise_duration": 0.5,
-    "spanish_dialect": "es-ES",
-    "english_dialect": "en-US",
-    "speech_speed": False,
-    "max_conversation_history": 50,
-    "auto_play_audio": True,
-    "show_timestamps": False
-}
+# Initialize logging before any other operations
+config = load_config()
+setup_logging(
+    log_level=config.get('log_level', 'INFO'),
+    log_to_file=True,
+    log_to_console=False  # Disable console in Streamlit
+)
 
-# Cloud-hosted models (too large to run locally)
-CLOUD_MODELS = {
-    "deepseek-v3": "671B parameters - Excellent multilingual support",
-    "qwen2.5:72b": "72B parameters - Strong language capabilities",
-    "llama3.1:70b": "70B parameters - High quality responses",
-    "mixtral:8x7b": "47B parameters - Fast and capable"
-}
-
-# Try to import Ollama
-try:
-    import ollama
-    OLLAMA_AVAILABLE = True
-except ImportError:
-    OLLAMA_AVAILABLE = False
-
-
-class ConfigManager:
-    """Manages application configuration and persistence."""
-    
-    @staticmethod
-    def load_config() -> Dict[str, Any]:
-        """Load configuration from file or return defaults."""
-        try:
-            if CONFIG_FILE.exists():
-                with open(CONFIG_FILE, 'r') as f:
-                    config = json.load(f)
-                    # Merge with defaults to handle new settings
-                    return {**DEFAULT_CONFIG, **config}
-            return DEFAULT_CONFIG.copy()
-        except Exception as e:
-            st.error(f"Error loading config: {e}")
-            return DEFAULT_CONFIG.copy()
-    
-    @staticmethod
-    def save_config(config: Dict[str, Any]) -> bool:
-        """Save configuration to file."""
-        try:
-            with open(CONFIG_FILE, 'w') as f:
-                json.dump(config, f, indent=2)
-            return True
-        except Exception as e:
-            st.error(f"Error saving config: {e}")
-            return False
-    
-    @staticmethod
-    def reset_config() -> Dict[str, Any]:
-        """Reset configuration to defaults."""
-        ConfigManager.save_config(DEFAULT_CONFIG)
-        return DEFAULT_CONFIG.copy()
-
-
-class OllamaManager:
-    """Manages Ollama model interactions (local and cloud)."""
-    
-    @staticmethod
-    def get_local_models() -> List[str]:
-        """Retrieve list of locally downloaded Ollama models."""
-        if not OLLAMA_AVAILABLE:
-            return []
-        
-        try:
-            # Try the standard API method first
-            models_response = ollama.list()
-            model_names = [model['name'].split(':')[0] for model in models_response['models']]
-            return sorted(set(model_names))
-        except Exception as e:
-            # If API fails, try reading from file system (Windows fallback)
-            try:
-                # Check Windows default location
-                windows_path = Path.home() / ".ollama" / "models" / "manifests" / "registry.ollama.ai" / "library"
-                
-                if windows_path.exists():
-                    model_names = []
-                    for model_dir in windows_path.iterdir():
-                        if model_dir.is_dir():
-                            model_names.append(model_dir.name)
-                    
-                    if model_names:
-                        return sorted(set(model_names))
-                
-                # If no models found via filesystem, return empty with helpful error
-                st.warning(f"Could not detect models automatically. Error: {e}")
-                st.info(f"Models location: {windows_path}")
-                return []
-            except Exception as fs_error:
-                st.error(f"Error detecting models: {e}\nFilesystem check error: {fs_error}")
-                return []
-    
-    @staticmethod
-    def get_cloud_models() -> List[Dict[str, str]]:
-        """Get list of recommended cloud models."""
-        return [{"name": name, "description": desc} for name, desc in CLOUD_MODELS.items()]
-    
-    @staticmethod
-    def call_local_llm(prompt: str, system_prompt: str, model: str) -> str:
-        """Call local LLM via Ollama."""
-        if not OLLAMA_AVAILABLE:
-            return "Error: Ollama not available. Please install it."
-        
-        try:
-            # Ensure Ollama service is running
-            response = ollama.chat(
-                model=model,
-                messages=[
-                    {'role': 'system', 'content': system_prompt},
-                    {'role': 'user', 'content': prompt}
-                ]
-            )
-            return response['message']['content']
-        except ollama.ResponseError as e:
-            return f"Error: Model '{model}' not found or not loaded.\n\nPlease ensure:\n1. Ollama is running (check system tray)\n2. Model is downloaded: ollama pull {model}\n3. Try running: ollama list\n\nDetails: {str(e)}"
-        except Exception as e:
-            error_msg = str(e).lower()
-            if "connection" in error_msg or "refused" in error_msg:
-                return f"Error: Cannot connect to Ollama service.\n\nPlease ensure Ollama is running:\n- Windows: Check system tray for Ollama icon\n- If not running: Start Ollama from Start Menu\n- Or run in terminal: ollama serve\n\nDetails: {str(e)}"
-            return f"Error calling local LLM: {str(e)}\n\nTroubleshooting:\n1. Ensure Ollama is running\n2. Verify model exists: ollama list\n3. Try: ollama run {model}"
-    
-    @staticmethod
-    def call_cloud_llm(prompt: str, system_prompt: str, model: str, 
-                       endpoint: str, api_key: str) -> str:
-        """Call cloud-hosted LLM via Ollama API."""
-        try:
-            # For Ollama Cloud, we use the same API structure
-            if api_key:
-                headers = {
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json"
-                }
-            else:
-                headers = {"Content-Type": "application/json"}
-            
-            payload = {
-                "model": model,
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": prompt}
-                ],
-                "stream": False
-            }
-            
-            response = requests.post(
-                f"{endpoint}/api/chat",
-                headers=headers,
-                json=payload,
-                timeout=60
-            )
-            
-            if response.status_code == 200:
-                return response.json()['message']['content']
-            else:
-                return f"Error: Cloud API returned status {response.status_code}\n{response.text}"
-        
-        except requests.exceptions.Timeout:
-            return "Error: Request timed out. The model may be loading or the server is busy."
-        except requests.exceptions.ConnectionError:
-            return "Error: Could not connect to cloud endpoint. Please check your endpoint URL and internet connection."
-        except Exception as e:
-            return f"Error calling cloud LLM: {str(e)}"
-    
-    @staticmethod
-    def call_llm(prompt: str, system_prompt: str, config: Dict[str, Any]) -> str:
-        """Call LLM (routes to local or cloud based on config)."""
-        model = config['preferred_model']
-        
-        if config['use_cloud']:
-            return OllamaManager.call_cloud_llm(
-                prompt, 
-                system_prompt, 
-                model,
-                config['cloud_endpoint'],
-                config['cloud_api_key']
-            )
-        else:
-            return OllamaManager.call_local_llm(prompt, system_prompt, model)
-
-
-class SpanishTutor:
-    """Main Spanish tutoring functionality."""
-    
-    def __init__(self, config: Dict[str, Any]):
-        self.config = config
-    
-    def translate_to_spanish(self, text: str) -> str:
-        """Translate English to Spanish."""
-        system_prompt = """You are a helpful Spanish language tutor. Translate the English text to Spanish. 
-        Provide natural, conversational Spanish. Format your response as:
-        Spanish: [translation]
-        Notes: [any relevant grammar or cultural notes]"""
-        
-        prompt = f"Translate to Spanish: {text}"
-        return OllamaManager.call_llm(prompt, system_prompt, self.config)
-    
-    def correct_spanish(self, text: str) -> str:
-        """Correct Spanish text and provide feedback."""
-        system_prompt = """You are a helpful Spanish language tutor. Review the Spanish text provided.
-        If there are errors, provide corrections. If it's correct, confirm it.
-        Format your response as:
-        Corrected: [corrected version or "¡Correcto!"]
-        Explanation: [explain any corrections or confirm correctness]
-        English: [English translation]"""
-        
-        prompt = f"Review this Spanish text: {text}"
-        return OllamaManager.call_llm(prompt, system_prompt, self.config)
-    
-    def conversational_response(self, text: str, is_spanish: bool = True) -> str:
-        """Generate conversational response for practice."""
-        if is_spanish:
-            system_prompt = """You are a friendly Spanish conversation partner. Respond naturally in Spanish 
-            to continue the conversation. Keep responses conversational and appropriate for language learning.
-            After your Spanish response, provide:
-            - English translation in parentheses
-            - Any corrections to the user's Spanish if needed"""
-            prompt = f"The user said in Spanish: {text}\nRespond naturally in Spanish and continue the conversation."
-        else:
-            system_prompt = """You are a friendly Spanish conversation partner. The user spoke in English.
-            Respond in Spanish as if having a natural conversation, and provide the English translation."""
-            prompt = f"The user said in English: {text}\nRespond in Spanish and provide English translation."
-        
-        return OllamaManager.call_llm(prompt, system_prompt, self.config)
-
-
-class AudioManager:
-    """Manages audio input/output functionality."""
-    
-    @staticmethod
-    def text_to_speech(text: str, lang: str = 'es', slow: bool = False) -> Optional[str]:
-        """Convert text to speech and return audio file path."""
-        try:
-            tts = gTTS(text=text, lang=lang, slow=slow)
-            temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.mp3')
-            tts.save(temp_file.name)
-            return temp_file.name
-        except Exception as e:
-            st.error(f"Error generating speech: {str(e)}")
-            return None
-    
-    @staticmethod
-    def speech_to_text(language: str, timeout: int, phrase_limit: int, 
-                       ambient_duration: float) -> Optional[str]:
-        """Convert speech to text."""
-        recognizer = sr.Recognizer()
-        
-        try:
-            with sr.Microphone() as source:
-                st.info("🎤 Listening... Speak now!")
-                recognizer.adjust_for_ambient_noise(source, duration=ambient_duration)
-                audio = recognizer.listen(source, timeout=timeout, phrase_time_limit=phrase_limit)
-                st.info("Processing...")
-                
-                text = recognizer.recognize_google(audio, language=language)
-                return text
-        except sr.WaitTimeoutError:
-            st.error("No speech detected. Please try again.")
-            return None
-        except sr.UnknownValueError:
-            st.error("Could not understand audio. Please try again.")
-            return None
-        except sr.RequestError as e:
-            st.error(f"Error with speech recognition service: {str(e)}")
-            return None
-        except Exception as e:
-            st.error(f"Error: {str(e)}")
-            return None
+# Get module logger
+logger = get_logger(__name__)
+logger.info("Application starting...")
 
 
 def initialize_session_state():
-    """Initialize all session state variables."""
+    """
+    Initialize all session state variables for the Streamlit app.
+    
+    Sets up configuration, conversation history, model lists, and other
+    state variables needed throughout the application.
+    """
+    logger.debug("Initializing session state")
+    
     if 'config' not in st.session_state:
-        st.session_state.config = ConfigManager.load_config()
+        st.session_state.config = load_config()
+        logger.info("Configuration loaded into session state")
     
     if 'conversation_history' not in st.session_state:
         st.session_state.conversation_history = []
+        logger.debug("Conversation history initialized")
     
     if 'local_models' not in st.session_state:
-        st.session_state.local_models = OllamaManager.get_local_models()
+        st.session_state.local_models = get_local_models()
+        logger.info(f"Found {len(st.session_state.local_models)} local models")
     
     if 'cloud_models' not in st.session_state:
-        st.session_state.cloud_models = OllamaManager.get_cloud_models()
+        st.session_state.cloud_models = get_cloud_models()
+        logger.debug(f"Loaded {len(st.session_state.cloud_models)} cloud models")
     
     if 'last_translation' not in st.session_state:
         st.session_state.last_translation = None
@@ -321,10 +71,17 @@ def initialize_session_state():
     
     if 'last_audio' not in st.session_state:
         st.session_state.last_audio = None
+    
+    if 'page' not in st.session_state:
+        st.session_state.page = "main"
+    
+    logger.debug("Session state initialization complete")
 
 
 def render_options_page():
-    """Render the options/settings page."""
+    """Render the options/settings page with all configuration options."""
+    logger.info("Rendering options page")
+    
     st.title("⚙️ Options")
     
     config = st.session_state.config
@@ -336,171 +93,238 @@ def render_options_page():
     use_cloud = st.checkbox(
         "Use Cloud-hosted Models",
         value=config['use_cloud'],
-        help="Enable this for large models like deepseek-v3 that are too big to run locally"
+        help="Enable this for large models like deepseek-v3 hosted on ollama.com"
     )
+    
+    if use_cloud != config['use_cloud']:
+        logger.info(f"Cloud mode changed: {config['use_cloud']} -> {use_cloud}")
+    
     config['use_cloud'] = use_cloud
     
     if use_cloud:
-        st.info("☁️ **Cloud Mode**: Using remote Ollama API for large models")
-        
-        # Cloud endpoint
-        config['cloud_endpoint'] = st.text_input(
-            "Cloud Endpoint URL",
-            value=config['cloud_endpoint'],
-            help="Ollama cloud API endpoint (e.g., https://api.ollama.ai)"
-        )
-        
-        # API Key (optional)
-        config['cloud_api_key'] = st.text_input(
-            "API Key (optional)",
-            value=config['cloud_api_key'],
-            type="password",
-            help="Your Ollama cloud API key if required"
-        )
-        
-        # Cloud model selection
-        st.subheader("Select Cloud Model")
-        cloud_models = st.session_state.cloud_models
-        
-        cloud_model_names = [m['name'] for m in cloud_models]
-        if config['preferred_model'] not in cloud_model_names:
-            config['preferred_model'] = cloud_model_names[0]
-        
-        current_index = cloud_model_names.index(config['preferred_model'])
-        
-        selected_model = st.selectbox(
-            "Cloud Model",
-            cloud_model_names,
-            index=current_index,
-            format_func=lambda x: f"{x} - {next((m['description'] for m in cloud_models if m['name'] == x), '')}",
-            help="Select a cloud-hosted model"
-        )
-        config['preferred_model'] = selected_model
-        
-        st.warning("⚠️ Note: Cloud models may have usage costs. Check with your Ollama cloud provider.")
-        
+        render_cloud_model_settings(config)
     else:
-        st.info("💻 **Local Mode**: Using models installed on your computer")
-        
-        local_models = st.session_state.local_models
-        
-        if not local_models:
-            st.error("No local Ollama models found. Please install models using 'ollama pull <model-name>'")
-            st.info("Recommended local models: qwen2.5:7b, llama2, gemma3")
-            
-            st.markdown("---")
-            st.subheader("Manual Model Entry")
-            st.markdown("If you have models installed but they're not detected, enter the model name manually:")
-            
-            manual_model = st.text_input(
-                "Model Name",
-                placeholder="e.g., llama2, qwen2.5:7b, deepseek-v3",
-                help="Enter the exact model name as shown in 'ollama list'"
-            )
-            
-            if manual_model:
-                config['preferred_model'] = manual_model
-                st.success(f"Using manual model: {manual_model}")
-                st.info("Click 'Save Settings' below to save this model")
-            
-            col1, col2 = st.columns(2)
-            with col1:
-                if st.button("🔄 Refresh Local Models"):
-                    st.session_state.local_models = OllamaManager.get_local_models()
-                    st.rerun()
-            
-            with col2:
-                if st.button("🧪 Test Ollama Connection"):
-                    try:
-                        test_models = ollama.list()
-                        st.success(f"✅ Ollama connected! Found {len(test_models.get('models', []))} models")
-                        if test_models.get('models'):
-                            st.write("Models detected:")
-                            for m in test_models['models']:
-                                st.write(f"- {m['name']}")
-                    except Exception as e:
-                        st.error(f"❌ Connection failed: {e}")
-                        st.info("Make sure Ollama is running (check system tray)")
-        else:
-            # Ensure preferred model is in available models
-            if config['preferred_model'] not in local_models:
-                config['preferred_model'] = local_models[0]
-            
-            current_index = local_models.index(config['preferred_model'])
-            
-            preferred_model = st.selectbox(
-                "Local Model",
-                local_models,
-                index=current_index,
-                help="Select the locally installed LLM model"
-            )
-            config['preferred_model'] = preferred_model
-            
-            col1, col2 = st.columns(2)
-            with col1:
-                if st.button("🔄 Refresh Local Models"):
-                    st.session_state.local_models = OllamaManager.get_local_models()
-                    st.rerun()
-            
-            with col2:
-                if st.button("☁️ Switch to Cloud Models"):
-                    config['use_cloud'] = True
-                    st.rerun()
-    
-    st.markdown(f"**Current Selection:** {config['preferred_model']} ({'Cloud' if config['use_cloud'] else 'Local'})")
-    
-    # Diagnostics section
-    with st.expander("🔧 Diagnostics & Troubleshooting"):
-        st.markdown("### System Information")
-        
-        col1, col2 = st.columns(2)
-        with col1:
-            st.write(f"**Ollama Python Library:** {'✅ Installed' if OLLAMA_AVAILABLE else '❌ Not installed'}")
-            st.write(f"**OS:** {os.name}")
-            st.write(f"**Home Directory:** {Path.home()}")
-        
-        with col2:
-            models_path = Path.home() / ".ollama" / "models"
-            st.write(f"**Models Path Exists:** {'✅ Yes' if models_path.exists() else '❌ No'}")
-            if models_path.exists():
-                st.write(f"**Models Path:** {models_path}")
-        
-        st.markdown("---")
-        st.markdown("### Quick Tests")
-        
-        if st.button("🧪 Test Ollama Service"):
-            with st.spinner("Testing connection..."):
-                try:
-                    import subprocess
-                    result = subprocess.run(['ollama', 'list'], capture_output=True, text=True, timeout=5)
-                    if result.returncode == 0:
-                        st.success("✅ Ollama CLI is working!")
-                        st.code(result.stdout)
-                    else:
-                        st.error(f"❌ Ollama CLI error: {result.stderr}")
-                except FileNotFoundError:
-                    st.error("❌ Ollama CLI not found in PATH")
-                    st.info("Make sure Ollama is installed and added to PATH")
-                except Exception as e:
-                    st.error(f"❌ Error: {e}")
-        
-        if st.button("🔍 Scan Models Directory"):
-            with st.spinner("Scanning..."):
-                models_path = Path.home() / ".ollama" / "models" / "manifests" / "registry.ollama.ai" / "library"
-                if models_path.exists():
-                    found_models = [d.name for d in models_path.iterdir() if d.is_dir()]
-                    if found_models:
-                        st.success(f"✅ Found {len(found_models)} models in filesystem:")
-                        for model in found_models:
-                            st.write(f"- {model}")
-                    else:
-                        st.warning("⚠️ Models directory exists but no models found")
-                else:
-                    st.error(f"❌ Models directory not found: {models_path}")
+        render_local_model_settings(config)
     
     st.divider()
     
     # Speech Settings
+    render_speech_settings(config)
+    
+    st.divider()
+    
+    # UI Settings
+    render_ui_settings(config)
+    
+    st.divider()
+    
+    # Logging Settings
+    render_logging_settings(config)
+    
+    st.divider()
+    
+    # Diagnostics
+    render_diagnostics()
+    
+    st.divider()
+    
+    # Save/Reset buttons
+    render_options_buttons(config)
+
+
+def render_cloud_model_settings(config: Dict[str, Any]):
+    """Render cloud model configuration options."""
+    logger.debug("Rendering cloud model settings")
+    
+    st.info("☁️ **Cloud Mode**: Using ollama.com cloud API for large models")
+    
+    # Cloud endpoint
+    config['cloud_endpoint'] = st.text_input(
+        "Cloud Endpoint URL",
+        value=config['cloud_endpoint'],
+        help="Ollama cloud API endpoint (default: https://ollama.com)"
+    )
+    
+    # API Key management
+    st.subheader("🔑 API Key Configuration")
+    
+    current_api_key = get_api_key()
+    api_key_status = "✅ Set" if current_api_key else "❌ Not set"
+    
+    st.info(f"**API Key Status:** {api_key_status}")
+    st.caption("Get your API key at: https://ollama.com/settings/keys")
+    
+    # Show masked key if exists
+    if current_api_key:
+        masked_key = current_api_key[:8] + "..." + current_api_key[-8:] if len(current_api_key) > 16 else "***"
+        st.text_input(
+            "Current API Key (masked)",
+            value=masked_key,
+            disabled=True,
+            help="Your API key is stored securely"
+        )
+    
+    # Input for new/updated API key
+    new_api_key = st.text_input(
+        "Enter/Update API Key",
+        type="password",
+        placeholder="Paste your Ollama API key here",
+        help="Get your API key from https://ollama.com/settings/keys"
+    )
+    
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        if st.button("💾 Save API Key", disabled=not new_api_key):
+            if new_api_key:
+                logger.info("Saving new API key")
+                env_vars = load_env()
+                env_vars['OLLAMA_API_KEY'] = new_api_key
+                if save_env(env_vars):
+                    st.success("✅ API key saved successfully!")
+                    logger.info("API key saved successfully")
+                    st.rerun()
+                else:
+                    st.error("❌ Failed to save API key")
+                    logger.error("Failed to save API key")
+    
+    with col2:
+        if st.button("🗑️ Remove API Key", disabled=not current_api_key):
+            logger.info("Removing API key")
+            env_vars = load_env()
+            if 'OLLAMA_API_KEY' in env_vars:
+                del env_vars['OLLAMA_API_KEY']
+                if save_env(env_vars):
+                    st.success("✅ API key removed")
+                    logger.info("API key removed successfully")
+                    st.rerun()
+    
+    with col3:
+        if st.button("👁️ Show API Key", disabled=not current_api_key):
+            if current_api_key:
+                st.code(current_api_key, language=None)
+                st.warning("⚠️ Keep this key secret!")
+    
+    st.divider()
+    
+    # Cloud model selection
+    st.subheader("Select Cloud Model")
+    cloud_models = st.session_state.cloud_models
+    cloud_model_names = [m['name'] for m in cloud_models]
+    
+    if config['preferred_model'] not in cloud_model_names:
+        config['preferred_model'] = cloud_model_names[0]
+    
+    current_index = cloud_model_names.index(config['preferred_model'])
+    
+    selected_model = st.selectbox(
+        "Cloud Model",
+        cloud_model_names,
+        index=current_index,
+        format_func=lambda x: f"{x} - {next((m['description'] for m in cloud_models if m['name'] == x), '')}",
+        help="Select a cloud-hosted model from ollama.com"
+    )
+    
+    if selected_model != config['preferred_model']:
+        logger.info(f"Model changed: {config['preferred_model']} -> {selected_model}")
+    
+    config['preferred_model'] = selected_model
+    
+    st.info("""
+    **Recommended for Spanish Learning:**
+    - **gpt-oss**: Good starting point, fast
+    - **deepseek-v3**: Best for Spanish (recommended)
+    - **llama3.1:70b**: High quality responses
+    - **qwen2.5:72b**: Strong multilingual
+    """)
+
+
+def render_local_model_settings(config: Dict[str, Any]):
+    """Render local model configuration options."""
+    logger.debug("Rendering local model settings")
+    
+    st.info("💻 **Local Mode**: Using models installed on your computer")
+    
+    local_models = st.session_state.local_models
+    
+    if not local_models:
+        st.error("No local Ollama models found. Please install models using 'ollama pull <model-name>'")
+        st.info("Recommended local models: qwen2.5:7b, llama2, gemma3")
+        
+        st.markdown("---")
+        st.subheader("Manual Model Entry")
+        st.markdown("If you have models installed but they're not detected, enter the model name manually:")
+        
+        manual_model = st.text_input(
+            "Model Name",
+            placeholder="e.g., llama2, qwen2.5:7b",
+            help="Enter the exact model name as shown in 'ollama list'"
+        )
+        
+        if manual_model:
+            config['preferred_model'] = manual_model
+            st.success(f"Using manual model: {manual_model}")
+            logger.info(f"Manual model set: {manual_model}")
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("🔄 Refresh Local Models"):
+                logger.info("Refreshing local models list")
+                st.session_state.local_models = get_local_models()
+                st.rerun()
+        
+        with col2:
+            if st.button("🧪 Test Ollama Connection"):
+                logger.info("Testing Ollama connection")
+                status = test_ollama_connection()
+                if status['connected']:
+                    st.success(f"✅ Ollama connected! Found {status['models_found']} models")
+                    logger.info(f"Connection successful: {status['models_found']} models")
+                    if status['models']:
+                        st.write("Models detected:")
+                        for m in status['models']:
+                            st.write(f"- {m}")
+                else:
+                    st.error(f"❌ Connection failed: {status['error']}")
+                    logger.error(f"Connection failed: {status['error']}")
+    else:
+        if config['preferred_model'] not in local_models:
+            config['preferred_model'] = local_models[0]
+        
+        current_index = local_models.index(config['preferred_model'])
+        
+        preferred_model = st.selectbox(
+            "Local Model",
+            local_models,
+            index=current_index,
+            help="Select the locally installed LLM model"
+        )
+        
+        if preferred_model != config['preferred_model']:
+            logger.info(f"Model changed: {config['preferred_model']} -> {preferred_model}")
+        
+        config['preferred_model'] = preferred_model
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("🔄 Refresh Local Models"):
+                logger.info("Refreshing local models list")
+                st.session_state.local_models = get_local_models()
+                st.rerun()
+        
+        with col2:
+            if st.button("☁️ Switch to Cloud Models"):
+                logger.info("Switching to cloud mode")
+                config['use_cloud'] = True
+                st.rerun()
+    
+    st.markdown(f"**Current Selection:** {config['preferred_model']} ({'Cloud' if config['use_cloud'] else 'Local'})")
+
+
+def render_speech_settings(config: Dict[str, Any]):
+    """Render speech recognition configuration options."""
+    logger.debug("Rendering speech settings")
+    
     st.header("🎤 Speech Recognition Settings")
     
     col1, col2 = st.columns(2)
@@ -566,10 +390,12 @@ def render_options_page():
             value=config['speech_speed'],
             help="Generate slower audio for pronunciation practice"
         )
+
+
+def render_ui_settings(config: Dict[str, Any]):
+    """Render user interface configuration options."""
+    logger.debug("Rendering UI settings")
     
-    st.divider()
-    
-    # UI Settings
     st.header("🎨 Interface Settings")
     
     col1, col2 = st.columns(2)
@@ -596,34 +422,118 @@ def render_options_page():
             value=config['show_timestamps'],
             help="Display timestamps in conversation history"
         )
+
+
+def render_logging_settings(config: Dict[str, Any]):
+    """Render logging configuration options."""
+    logger.debug("Rendering logging settings")
     
-    st.divider()
+    st.header("📋 Logging Settings")
     
-    # Save/Reset buttons
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        log_levels = ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
+        current_level = config.get('log_level', 'INFO')
+        
+        new_log_level = st.selectbox(
+            "Log Level",
+            options=log_levels,
+            index=log_levels.index(current_level) if current_level in log_levels else 1,
+            help="Verbosity of logging output"
+        )
+        
+        if new_log_level != config.get('log_level'):
+            config['log_level'] = new_log_level
+            logger.info(f"Log level will be changed to: {new_log_level} (requires restart)")
+        
+        st.info(f"**Current Log File:** `{get_log_file_path()}`")
+    
+    with col2:
+        if st.button("📂 Show Log Location"):
+            st.code(get_log_file_path())
+        
+        if st.button("🗑️ Clear Old Logs (30+ days)"):
+            logger.info("Clearing old log files")
+            deleted = clear_old_logs(days=30)
+            st.success(f"Removed {deleted} old log files")
+            logger.info(f"Removed {deleted} old log files")
+
+
+def render_diagnostics():
+    """Render diagnostics and troubleshooting information."""
+    logger.debug("Rendering diagnostics")
+    
+    with st.expander("🔧 Diagnostics & Troubleshooting"):
+        st.markdown("### System Information")
+        
+        col1, col2 = st.columns(2)
+        
+        config_info = get_config_info()
+        
+        with col1:
+            st.write(f"**Ollama Python Library:** {'✅ Installed' if OLLAMA_AVAILABLE else '❌ Not installed'}")
+            st.write(f"**Config File:** {'✅ Exists' if config_info['config_exists'] else '❌ Not found'}")
+            st.write(f"**Config Location:** `{config_info['config_file']}`")
+        
+        with col2:
+            st.write(f"**API Key File:** {'✅ Exists' if config_info['env_exists'] else '❌ Not found'}")
+            st.write(f"**API Key Loaded:** {'✅ Yes' if config_info['has_api_key'] else '❌ No'}")
+            st.write(f"**Env Location:** `{config_info['env_file']}`")
+        
+        st.markdown("---")
+        st.markdown("### Quick Tests")
+        
+        if st.button("🧪 Test Ollama Connection"):
+            logger.info("Running Ollama connection test")
+            with st.spinner("Testing connection..."):
+                status = test_ollama_connection()
+                if status['connected']:
+                    st.success(f"✅ Ollama connected! Found {status['models_found']} models")
+                    if status['models']:
+                        st.write("Models available:")
+                        for m in status['models']:
+                            st.write(f"- {m}")
+                else:
+                    st.error(f"❌ Connection failed: {status['error']}")
+
+
+def render_options_buttons(config: Dict[str, Any]):
+    """Render save/reset/back buttons for options page."""
+    logger.debug("Rendering options buttons")
+    
     col1, col2, col3 = st.columns(3)
     
     with col1:
         if st.button("💾 Save Settings", type="primary", use_container_width=True):
-            if ConfigManager.save_config(config):
+            logger.info("Saving configuration")
+            if save_config(config):
                 st.success("Settings saved successfully!")
                 st.session_state.config = config
+                logger.info("Configuration saved successfully")
             else:
                 st.error("Failed to save settings")
+                logger.error("Failed to save configuration")
     
     with col2:
         if st.button("🔄 Reset to Defaults", use_container_width=True):
-            st.session_state.config = ConfigManager.reset_config()
+            logger.info("Resetting configuration to defaults")
+            st.session_state.config = reset_config()
             st.success("Settings reset to defaults!")
+            logger.info("Configuration reset complete")
             st.rerun()
     
     with col3:
         if st.button("🏠 Back to App", use_container_width=True):
+            logger.info("Returning to main app")
             st.session_state.page = "main"
             st.rerun()
 
 
 def render_translation_mode(tutor: SpanishTutor, config: Dict[str, Any]):
     """Render translation mode interface."""
+    logger.debug("Rendering translation mode")
+    
     st.header("📝 English to Spanish Translation")
     
     col1, col2 = st.columns(2)
@@ -634,25 +544,28 @@ def render_translation_mode(tutor: SpanishTutor, config: Dict[str, Any]):
         
         if st.button("Translate", type="primary"):
             if english_text:
+                logger.info(f"Translation requested: '{english_text[:50]}...'")
                 with st.spinner("Translating..."):
                     result = tutor.translate_to_spanish(english_text)
                     st.session_state.last_translation = result
                     
                     try:
                         spanish_part = result.split("Spanish:")[1].split("Notes:")[0].strip()
-                        audio_file = AudioManager.text_to_speech(
+                        audio_file = text_to_speech(
                             spanish_part, 
                             lang='es', 
                             slow=config['speech_speed']
                         )
                         st.session_state.last_audio = audio_file
-                    except:
-                        pass
+                        logger.debug("Audio generated for translation")
+                    except Exception as e:
+                        logger.warning(f"Could not generate audio: {e}")
     
     with col2:
         st.subheader("Voice Input")
         if st.button("🎤 Speak in English", type="secondary"):
-            text = AudioManager.speech_to_text(
+            logger.info("Starting voice input for translation")
+            text = speech_to_text(
                 config['english_dialect'],
                 config['speech_timeout'],
                 config['phrase_time_limit'],
@@ -660,20 +573,23 @@ def render_translation_mode(tutor: SpanishTutor, config: Dict[str, Any]):
             )
             if text:
                 st.success(f"You said: {text}")
+                logger.info(f"Voice input captured: '{text}'")
                 with st.spinner("Translating..."):
                     result = tutor.translate_to_spanish(text)
                     st.session_state.last_translation = result
                     
                     try:
                         spanish_part = result.split("Spanish:")[1].split("Notes:")[0].strip()
-                        audio_file = AudioManager.text_to_speech(
+                        audio_file = text_to_speech(
                             spanish_part, 
                             lang='es', 
                             slow=config['speech_speed']
                         )
                         st.session_state.last_audio = audio_file
-                    except:
-                        pass
+                    except Exception as e:
+                        logger.warning(f"Could not generate audio: {e}")
+            else:
+                logger.warning("No speech detected for translation")
     
     if st.session_state.last_translation:
         st.markdown("---")
@@ -686,6 +602,8 @@ def render_translation_mode(tutor: SpanishTutor, config: Dict[str, Any]):
 
 def render_correction_mode(tutor: SpanishTutor, config: Dict[str, Any]):
     """Render correction mode interface."""
+    logger.debug("Rendering correction mode")
+    
     st.header("✏️ Spanish Correction")
     
     col1, col2 = st.columns(2)
@@ -696,6 +614,7 @@ def render_correction_mode(tutor: SpanishTutor, config: Dict[str, Any]):
         
         if st.button("Check", type="primary"):
             if spanish_text:
+                logger.info(f"Correction requested: '{spanish_text[:50]}...'")
                 with st.spinner("Checking..."):
                     result = tutor.correct_spanish(spanish_text)
                     st.session_state.last_correction = result
@@ -703,7 +622,8 @@ def render_correction_mode(tutor: SpanishTutor, config: Dict[str, Any]):
     with col2:
         st.subheader("Voice Input")
         if st.button("🎤 Speak in Spanish", type="secondary"):
-            text = AudioManager.speech_to_text(
+            logger.info("Starting voice input for correction")
+            text = speech_to_text(
                 config['spanish_dialect'],
                 config['speech_timeout'],
                 config['phrase_time_limit'],
@@ -711,9 +631,12 @@ def render_correction_mode(tutor: SpanishTutor, config: Dict[str, Any]):
             )
             if text:
                 st.success(f"You said: {text}")
+                logger.info(f"Voice input captured: '{text}'")
                 with st.spinner("Checking..."):
                     result = tutor.correct_spanish(text)
                     st.session_state.last_correction = result
+            else:
+                logger.warning("No speech detected for correction")
     
     if st.session_state.last_correction:
         st.markdown("---")
@@ -723,12 +646,16 @@ def render_correction_mode(tutor: SpanishTutor, config: Dict[str, Any]):
 
 def render_conversation_mode(tutor: SpanishTutor, config: Dict[str, Any]):
     """Render conversation practice mode interface."""
+    logger.debug("Rendering conversation mode")
+    
     st.header("💬 Conversation Practice")
     
     # Trim conversation history if too long
     max_history = config['max_conversation_history']
     if len(st.session_state.conversation_history) > max_history:
+        trimmed = len(st.session_state.conversation_history) - max_history
         st.session_state.conversation_history = st.session_state.conversation_history[-max_history:]
+        logger.info(f"Trimmed {trimmed} old conversation messages")
     
     # Display conversation history
     if st.session_state.conversation_history:
@@ -748,12 +675,14 @@ def render_conversation_mode(tutor: SpanishTutor, config: Dict[str, Any]):
         
         if st.button("Send", type="primary"):
             if user_input:
+                logger.info(f"Conversation input: '{user_input[:50]}...' ({input_lang})")
                 process_conversation_input(tutor, config, user_input, input_lang)
     
     with col2:
         if st.button("🎤 Speak", type="secondary"):
+            logger.info("Starting voice input for conversation")
             lang_code = config['spanish_dialect'] if input_lang == "Spanish" else config['english_dialect']
-            text = AudioManager.speech_to_text(
+            text = speech_to_text(
                 lang_code,
                 config['speech_timeout'],
                 config['phrase_time_limit'],
@@ -761,12 +690,16 @@ def render_conversation_mode(tutor: SpanishTutor, config: Dict[str, Any]):
             )
             
             if text:
+                logger.info(f"Voice input captured: '{text}' ({input_lang})")
                 process_conversation_input(tutor, config, text, input_lang)
+            else:
+                logger.warning("No speech detected for conversation")
     
     if st.session_state.last_audio and config['auto_play_audio']:
         st.audio(st.session_state.last_audio, format='audio/mp3')
     
     if st.button("🗑️ Clear Conversation"):
+        logger.info("Clearing conversation history")
         st.session_state.conversation_history = []
         st.rerun()
 
@@ -774,8 +707,9 @@ def render_conversation_mode(tutor: SpanishTutor, config: Dict[str, Any]):
 def process_conversation_input(tutor: SpanishTutor, config: Dict[str, Any], 
                                text: str, language: str):
     """Process conversation input and generate response."""
-    is_spanish = (language == "Spanish")
+    logger.info(f"Processing conversation: '{text[:50]}...' ({language})")
     
+    is_spanish = (language == "Spanish")
     timestamp = datetime.now().strftime("%H:%M:%S")
     
     st.session_state.conversation_history.append({
@@ -793,23 +727,28 @@ def process_conversation_input(tutor: SpanishTutor, config: Dict[str, Any],
             'timestamp': datetime.now().strftime("%H:%M:%S")
         })
         
+        logger.info("Conversation response generated")
+        
         try:
             lines = response.split('\n')
             spanish_text = lines[0] if lines else response
-            audio_file = AudioManager.text_to_speech(
+            audio_file = text_to_speech(
                 spanish_text, 
                 lang='es', 
                 slow=config['speech_speed']
             )
             st.session_state.last_audio = audio_file
-        except:
-            pass
+            logger.debug("Audio generated for conversation response")
+        except Exception as e:
+            logger.warning(f"Could not generate audio: {e}")
     
     st.rerun()
 
 
 def render_main_app():
     """Render the main application interface."""
+    logger.debug("Rendering main application")
+    
     st.title("🇪🇸 Spanish Learning Assistant")
     st.markdown("Practice Spanish with text and voice input!")
     
@@ -820,6 +759,7 @@ def render_main_app():
         st.title("Navigation")
         
         if st.button("⚙️ Options", use_container_width=True):
+            logger.info("Navigating to options page")
             st.session_state.page = "options"
             st.rerun()
         
@@ -831,6 +771,8 @@ def render_main_app():
             ["Translation", "Correction", "Conversation Practice"],
             label_visibility="collapsed"
         )
+        
+        logger.debug(f"Mode selected: {mode}")
         
         st.divider()
         
@@ -869,6 +811,10 @@ def render_main_app():
 
 def main():
     """Main application entry point."""
+    logger.info("=" * 80)
+    logger.info("SPANISH LEARNING ASSISTANT - Session Started")
+    logger.info("=" * 80)
+    
     st.set_page_config(
         page_title="Spanish Learning Assistant",
         page_icon="🇪🇸",
@@ -876,18 +822,21 @@ def main():
         initial_sidebar_state="expanded"
     )
     
-    # Initialize session state
-    initialize_session_state()
-    
-    # Initialize page state
-    if 'page' not in st.session_state:
-        st.session_state.page = "main"
-    
-    # Route to appropriate page
-    if st.session_state.page == "options":
-        render_options_page()
-    else:
-        render_main_app()
+    try:
+        # Initialize session state
+        initialize_session_state()
+        
+        # Route to appropriate page
+        if st.session_state.page == "options":
+            render_options_page()
+        else:
+            render_main_app()
+            
+    except Exception as e:
+        logger.critical(f"Critical application error: {e}", exc_info=True)
+        st.error(f"A critical error occurred: {str(e)}")
+        st.error("Please check the logs for more details.")
+        st.info(f"Log file: {get_log_file_path()}")
 
 
 if __name__ == "__main__":

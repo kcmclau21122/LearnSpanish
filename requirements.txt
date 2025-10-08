@@ -1,0 +1,18 @@
+# Spanish Learning Assistant - Requirements
+# Python 3.8+ required
+
+# Streamlit for web interface
+streamlit>=1.28.0
+
+# Ollama for LLM integration
+ollama>=0.1.0
+
+# Speech Recognition
+SpeechRecognition>=3.10.0
+pyaudio>=0.2.13
+
+# Text-to-Speech
+gTTS>=2.4.0
+
+# Additional utilities
+requests>=2.31.0

@@ -370,7 +370,84 @@ personal_practice/
 # Audio recordings (may contain voice data)
 recordings/
 my_audio/
+# Spanish Learning Assistant - Git Ignore File
 
+# Sensitive Files - NEVER COMMIT THESE
+.env.txt
+*.env
+.env.*
+config.json
+.spanish_tutor/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environments
+venv/
+ENV/
+env/
+.venv
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Logs
+*.log
+logs/
+*.log.*
+
+# Temporary Files
+*.tmp
+*.temp
+temp/
+tmp/
+
+# Audio Files
+*.mp3
+*.wav
+audio_temp/
+
+# Streamlit
+.streamlit/secrets.toml
+.streamlit/config.toml
+
+# OS Files
+Thumbs.db
+.DS_Store
+desktop.ini
+
+# Backup Files
+*.bak
+*.backup
+*~
+
+# Test Files
+test_*.py
+tests/
 # Study notes with personal information
 study_notes/
 personal_notes.txt
