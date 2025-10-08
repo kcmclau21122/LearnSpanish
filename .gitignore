@@ -29,8 +29,16 @@ credentials.txt
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
-*.py[cod]
-*$py.class
+*.pyc
+*.pyo
+*.log
+*.tmp
+.env.txt
+.DS_Store
+.streamlit/secrets.toml
+*.egg-info/
+dist/
+build/
 
 # C extensions
 *.so
@@ -169,9 +177,6 @@ cython_debug/
 # STREAMLIT
 # ============================================
 
-# Streamlit cache
-.streamlit/
-*.streamlit/
 
 # Streamlit secrets
 secrets.toml
@@ -433,7 +438,7 @@ audio_temp/
 
 # Streamlit
 .streamlit/secrets.toml
-.streamlit/config.toml
+
 
 # OS Files
 Thumbs.db
